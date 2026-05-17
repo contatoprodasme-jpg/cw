@@ -6,18 +6,20 @@ import { CWSession, Player, FORMAT_SIZES } from '@/types';
 import { useLocalPlayer } from '@/components/PlayerProvider';
 import LoginModal from '@/components/LoginModal';
 import Link from 'next/link';
-import { use } from 'react';
 
-export default function CWPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
-  const { player, setPlayer } = useLocalPlayer();
+export default function CWPage({ params }: { params: { id: string } }) {
+  const id = params.id;
+  const { player } = useLocalPlayer();
   const [session, setSession] = useState<CWSession | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
   const [now, setNow] = useState(new Date());
   const [loading, setLoading] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
 
-  useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     return listenSessions(all => {
@@ -28,7 +30,7 @@ export default function CWPage({ params }: { params: Promise<{ id: string }> }) 
 
   useEffect(() => listenPlayers(id, setPlayers), [id]);
 
-  // Auto-fechar
+  // Auto-fechar quando passar do horário
   useEffect(() => {
     if (!session || session.status === 'closed' || !session.closingTime) return;
     const ms = session.closingTime.getTime() - now.getTime();
@@ -45,9 +47,11 @@ export default function CWPage({ params }: { params: Promise<{ id: string }> }) 
   const confirmed = players.filter(p => p.status === 'confirmed');
   const waiting = players.filter(p => p.status === 'waiting');
   const total = session ? FORMAT_SIZES[session.format] : 0;
+
+  // Busca pelo nome ignorando duplicatas (pega só a primeira ocorrência)
   const myEntry = players.find(p => p.name === player?.name);
   const isClosed = session?.status === 'closed';
-  const check = session ? canJoin(session.closingTime) : { allowed: false };
+  const check = session ? canJoin(session.closingTime) : { allowed: false, reason: '' };
 
   const ms = session?.closingTime ? session.closingTime.getTime() - now.getTime() : 0;
   const min = Math.max(0, Math.floor(ms / 60000));
@@ -55,14 +59,21 @@ export default function CWPage({ params }: { params: Promise<{ id: string }> }) 
 
   const handleJoin = async () => {
     if (!player) { setShowLogin(true); return; }
-    if (!check.allowed) return;
+    if (!check.allowed || myEntry) return;
+
     setLoading(true);
-    const pos = players.length + 1;
+    // Verifica se jogador já está na lista antes de inserir (evita duplicata)
+    const current = await getPlayers(id);
+    const alreadyIn = current.find(p => p.name === player.name);
+    if (alreadyIn) { setLoading(false); return; }
+
+    const pos = current.length + 1;
     const status = confirmed.length < total ? 'confirmed' : 'waiting';
     await joinCW(id, player.name, player.email,
       player.notifyNewCW, player.notifyAlmostFull, player.notifyClosed, pos, status);
-    const newConf = status === 'confirmed' ? confirmed.length + 1 : confirmed.length;
-    if (total - newConf === 1) {
+
+    const newConfCount = status === 'confirmed' ? confirmed.length + 1 : confirmed.length;
+    if (total - newConfCount === 1) {
       const all = await getPlayers(id);
       await sendEmails(all, 'almostFull', session!, window.location.href, 1);
     }
@@ -111,18 +122,19 @@ export default function CWPage({ params }: { params: Promise<{ id: string }> }) 
           <div className="bg-surface border border-brand/20 rounded-2xl p-5">
             <p className="text-brand text-xs tracking-widest text-center mb-4">TIMES SORTEADOS</p>
             <div className="grid grid-cols-2 gap-4">
-              {[{ label: 'TIME A', color: 'text-brand', bg: 'bg-brand/5', players: session.teamA },
-                { label: 'TIME B', color: 'text-blue-400', bg: 'bg-blue-400/5', players: session.teamB }]
-                .map(({ label, color, bg, players: tp }) => (
-                  <div key={label} className={`${bg} rounded-xl p-4`}>
-                    <p className={`${color} text-xs tracking-widest mb-3`}>{label}</p>
-                    {tp.map(n => (
-                      <p key={n} className={`text-sm py-1 ${n === player?.name ? `${color} font-black` : 'text-[#aaa]'}`}>
-                        {n}{n === player?.name ? ' (você)' : ''}
-                      </p>
-                    ))}
-                  </div>
-                ))}
+              {[
+                { label: 'TIME A', color: 'text-brand', bg: 'bg-brand/5', list: session.teamA },
+                { label: 'TIME B', color: 'text-blue-400', bg: 'bg-blue-400/5', list: session.teamB },
+              ].map(({ label, color, bg, list }) => (
+                <div key={label} className={`${bg} rounded-xl p-4`}>
+                  <p className={`${color} text-xs tracking-widest mb-3`}>{label}</p>
+                  {list.map(n => (
+                    <p key={n} className={`text-sm py-1 ${n === player?.name ? `${color} font-black` : 'text-[#aaa]'}`}>
+                      {n}{n === player?.name ? ' (você)' : ''}
+                    </p>
+                  ))}
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -132,12 +144,15 @@ export default function CWPage({ params }: { params: Promise<{ id: string }> }) 
           <div className="flex items-baseline gap-2 mb-2">
             <span className="text-5xl font-black">{confirmed.length}</span>
             <span className="text-[#333] text-3xl">/{total}</span>
-            <span className="text-[#444] text-sm">confirmados</span>
+            <span className="text-[#444] text-sm ml-1">confirmados</span>
             {waiting.length > 0 && <span className="text-yellow-500 text-sm">+{waiting.length} fila</span>}
           </div>
           <div className="h-1.5 bg-border rounded-full overflow-hidden">
             <div className="h-full rounded-full transition-all duration-500"
-              style={{ width: `${Math.min(100, (confirmed.length / total) * 100)}%`, background: confirmed.length >= total ? '#00ff88' : '#00aaff' }} />
+              style={{
+                width: `${Math.min(100, (confirmed.length / total) * 100)}%`,
+                background: confirmed.length >= total ? '#00ff88' : '#00aaff'
+              }} />
           </div>
         </div>
 
@@ -154,11 +169,13 @@ export default function CWPage({ params }: { params: Promise<{ id: string }> }) 
                 <span className="text-brand text-xs">✓</span>
               </div>
             ))}
-            {confirmed.length === 0 && <p className="text-[#333] text-sm py-2">Ninguém ainda — seja o primeiro!</p>}
+            {confirmed.length === 0 && (
+              <p className="text-[#333] text-sm py-2">Ninguém ainda — seja o primeiro!</p>
+            )}
           </div>
         </div>
 
-        {/* Fila espera */}
+        {/* Fila de espera */}
         {waiting.length > 0 && (
           <div>
             <p className="text-yellow-500/60 text-xs tracking-widest mb-3">FILA DE ESPERA</p>
@@ -189,7 +206,10 @@ export default function CWPage({ params }: { params: Promise<{ id: string }> }) 
           ) : (
             <button onClick={handleJoin} disabled={loading || !check.allowed}
               className="w-full bg-brand text-bg font-black text-sm tracking-widest py-5 rounded-2xl disabled:opacity-20 hover:brightness-110 transition shadow-lg shadow-brand/20">
-              {loading ? 'Entrando...' : !check.allowed ? `🔒 ${check.reason}` : confirmed.length >= total ? 'ENTRAR NA FILA' : 'QUERO JOGAR'}
+              {loading ? 'Entrando...'
+                : !check.allowed ? `🔒 ${check.reason}`
+                : confirmed.length >= total ? 'ENTRAR NA FILA'
+                : 'QUERO JOGAR'}
             </button>
           )}
         </div>
