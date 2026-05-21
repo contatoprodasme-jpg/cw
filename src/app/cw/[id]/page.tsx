@@ -177,4 +177,39 @@ export default function CWPage({ params }: { params: { id: string } }) {
         {/* Lista de Espera */}
         {waiting.length > 0 && (
           <div>
-            <h3 className="font-black text-sm tracking-widest text-
+            <h3 className="font-black text-sm tracking-widest text-[#444] uppercase mb-4 px-2">Fila de Espera ({waiting.length})</h3>
+            <div className="space-y-2.5">
+              {waiting.map((p, i) => (
+                <div key={p.id} className="flex items-center justify-between px-5 py-4 rounded-2xl bg-surface/40 border border-border/60">
+                  <span className={`text-sm font-bold ${p.name === player?.name ? 'text-yellow-400 font-bold' : 'text-[#555]'}`}>
+                    {p.name}{p.name === player?.name ? ' (você)' : ''}
+                  </span>
+                  <span className="text-yellow-500/60 text-xs">⏳ FILA</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Botão Fixo de Ação */}
+      {!isClosed && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-full max-w-lg px-4">
+          {myEntry ? (
+            <button onClick={handleLeave} disabled={loading}
+              className="w-full border border-red-500/30 text-red-400 font-bold text-sm py-5 rounded-2xl hover:bg-red-500/10 transition disabled:opacity-40">
+              {loading ? 'Saindo...' : myEntry.status === 'waiting' ? 'SAIR DA FILA' : 'SAIR DO LOBBY'}
+            </button>
+          ) : (
+            <button onClick={handleJoin} disabled={loading || !check.allowed}
+              className="w-full bg-brand text-bg font-black text-sm tracking-widest py-5 rounded-2xl disabled:opacity-20 hover:brightness-110 transition shadow-lg shadow-brand/20">
+              {loading ? 'Entrando...' : '⚡ CONFIRMAR PRESENÇA'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {showLogin && <LoginModal onLogin={(name, pix) => { setPlayer({ name, pix }); setShowLogin(false); }} onClose={() => setShowLogin(false)} />}
+    </div>
+  );
+}
