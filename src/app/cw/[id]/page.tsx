@@ -2,24 +2,21 @@
 import { useEffect, useState } from 'react';
 import { listenSessions, listenPlayers, leaveCW, promoteFirst, closeCW, updateStatus, getPlayers, canJoin, joinCW } from '@/lib/cwService';
 import { sendEmails } from '@/lib/emailService';
-import { CWSession, Player, FORMAT_SIZES } from '@/types';
+import { CWSession, Player } from '@/types';
 import { useLocalPlayer } from '@/components/PlayerProvider';
 import LoginModal from '@/components/LoginModal';
 import Link from 'next/link';
 
 export default function CWPage({ params }: { params: { id: string } }) {
-  const id = params.id;
-  const { player } = useLocalPlayer();
+  const id = params.id; // Correção nativa do Next.js para evitar a Client-Side Exception
+  const { player, setPlayer } = useLocalPlayer();
   const [session, setSession] = useState<CWSession | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
   const [now, setNow] = useState(new Date());
   const [loading, setLoading] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
 
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
+  useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
 
   useEffect(() => {
     return listenSessions(all => {
@@ -30,164 +27,161 @@ export default function CWPage({ params }: { params: { id: string } }) {
 
   useEffect(() => listenPlayers(id, setPlayers), [id]);
 
-  // Auto-fechar quando passar do horário
+  // Lógica Dinâmica para verificar e fechar CWs por tamanho de lista completo
+  useEffect(() => {
+    if (!session || session.status === 'closed') return;
+
+    const confirmedPlayers = players.filter(p => p.status === 'confirmed');
+    const totalConfirmed = confirmedPlayers.length;
+
+    // Tamanhos válidos aceitos para fechamento automático: 6(3v3), 8(4v4), 10(5v5), 12(6v6), 14(7v7), 16(8v8)
+    const validSizes = [6, 8, 10, 12, 14, 16];
+    
+    if (validSizes.includes(totalConfirmed) && session.format !== `${totalConfirmed/2}v${totalConfirmed/2}`) {
+      const currentFormat = `${totalConfirmed/2}v${totalConfirmed/2}`;
+      
+      const autoClose = async () => {
+        await updateStatus(id, 'closed', currentFormat, totalConfirmed);
+        
+        const timeLabel = session.closingTime ? new Date(session.closingTime.seconds * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--';
+        
+        await sendEmails({
+          type: 'cw_closed',
+          cwId: id,
+          time: timeLabel,
+          creator: session.createdBy,
+          format: currentFormat
+        });
+      };
+      
+      autoClose().catch(console.error);
+    }
+  }, [players, session, id]);
+
+  // Auto-fechar por tempo esgotado
   useEffect(() => {
     if (!session || session.status === 'closed' || !session.closingTime) return;
-    const ms = session.closingTime.getTime() - now.getTime();
-    if (ms <= 0) {
-      const conf = players.filter(p => p.status === 'confirmed');
-      closeCW(id, conf.map(p => p.name), session.sortTeams).then(() => {
-        sendEmails(players, 'closed', session, window.location.href);
-      });
-    } else if (ms <= 10 * 60 * 1000 && session.status === 'open') {
-      updateStatus(id, 'closing_soon');
+    const limit = new Date(session.closingTime.seconds * 1000);
+    if (now >= limit) {
+      const confirmed = players.filter(p => p.status === 'confirmed').length;
+      // Define o formato final com base no número atual de pessoas se o tempo acabou
+      const finalFormat = confirmed >= 6 ? `${Math.floor(confirmed/2)}v${Math.floor(confirmed/2)}` : 'Cancelada';
+      closeCW(id, finalFormat).catch(console.error);
     }
-  }, [now, session, players]);
+  }, [now, session, players, id]);
+
+  if (!session) {
+    return (
+      <div className=\"min-h-screen bg-bg flex flex-col items-center justify-center p-4\">
+        <p className=\"text-[#444] text-sm font-bold animate-pulse\">Carregando dados do lobby...</p>
+      </div>
+    );
+  }
 
   const confirmed = players.filter(p => p.status === 'confirmed');
   const waiting = players.filter(p => p.status === 'waiting');
-  const total = session ? FORMAT_SIZES[session.format] : 0;
-
-  // Busca pelo nome ignorando duplicatas (pega só a primeira ocorrência)
   const myEntry = players.find(p => p.name === player?.name);
-  const isClosed = session?.status === 'closed';
-  const check = session ? canJoin(session.closingTime) : { allowed: false, reason: '' };
+  const isClosed = session.status === 'closed';
 
-  const ms = session?.closingTime ? session.closingTime.getTime() - now.getTime() : 0;
-  const min = Math.max(0, Math.floor(ms / 60000));
-  const sec = Math.max(0, Math.floor((ms % 60000) / 1000));
+  const check = canJoin(session, players, player?.name || '');
 
   const handleJoin = async () => {
     if (!player) { setShowLogin(true); return; }
-    if (!check.allowed || myEntry) return;
-
     setLoading(true);
-    // Verifica se jogador já está na lista antes de inserir (evita duplicata)
-    const current = await getPlayers(id);
-    const alreadyIn = current.find(p => p.name === player.name);
-    if (alreadyIn) { setLoading(false); return; }
-
-    const pos = current.length + 1;
-    const status = confirmed.length < total ? 'confirmed' : 'waiting';
-    await joinCW(id, player.name, player.email,
-      player.notifyNewCW, player.notifyAlmostFull, player.notifyClosed, pos, status);
-
-    const newConfCount = status === 'confirmed' ? confirmed.length + 1 : confirmed.length;
-    if (total - newConfCount === 1) {
-      const all = await getPlayers(id);
-      await sendEmails(all, 'almostFull', session!, window.location.href, 1);
+    try {
+      const targetStatus = confirmed.length < 16 ? 'confirmed' : 'waiting';
+      await joinCW(id, player, targetStatus);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleLeave = async () => {
-    if (!player) return;
+    if (!player || !myEntry) return;
     setLoading(true);
-    await leaveCW(id, player.name);
-    if (myEntry?.status === 'confirmed' && waiting.length > 0) await promoteFirst(id);
-    setLoading(false);
+    try {
+      await leaveCW(id, myEntry.id);
+      if (myEntry.status === 'confirmed' && waiting.length > 0) {
+        await promoteFirst(id, waiting[0]);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  if (!session) return (
-    <div className="min-h-screen bg-bg flex items-center justify-center">
-      <div className="text-brand animate-pulse text-2xl font-black tracking-widest">CW</div>
-    </div>
-  );
+  const limitDate = session.closingTime ? new Date(session.closingTime.seconds * 1000) : null;
+  const diffMs = limitDate ? limitDate.getTime() - now.getTime() : 0;
+  const diffMin = Math.ceil(diffMs / (1000 * 60));
+  const timeLabel = limitDate ? limitDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--';
 
   return (
-    <main className="min-h-screen bg-bg">
-      <header className="px-4 py-4 flex items-center gap-4 border-b border-border">
-        <Link href="/" className="text-[#444] hover:text-[#666] transition">← voltar</Link>
-        <span className="text-brand font-black tracking-widest text-xl">CW</span>
-      </header>
-
-      <div className="max-w-lg mx-auto px-4 py-6 pb-32 space-y-6">
-        {/* Timer */}
-        {!isClosed && (
-          <div className="text-center">
-            <p className="text-[#333] text-xs tracking-widest mb-1">FECHA EM</p>
-            <p className={`text-7xl font-black tabular-nums tracking-wider ${min <= 5 ? 'text-red-400' : min <= 10 ? 'text-yellow-500' : 'text-brand'}`}>
-              {String(min).padStart(2, '0')}:{String(sec).padStart(2, '0')}
-            </p>
-            {!check.allowed && (
-              <div className="inline-flex items-center gap-2 bg-red-500/10 border border-red-500/20 rounded-full px-4 py-2 mt-3">
-                <span className="text-red-400 text-sm font-bold">🔒 {check.reason}</span>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Times sorteados */}
-        {isClosed && session.teamA && session.teamB && (
-          <div className="bg-surface border border-brand/20 rounded-2xl p-5">
-            <p className="text-brand text-xs tracking-widest text-center mb-4">TIMES SORTEADOS</p>
-            <div className="grid grid-cols-2 gap-4">
-              {[
-                { label: 'TIME A', color: 'text-brand', bg: 'bg-brand/5', list: session.teamA },
-                { label: 'TIME B', color: 'text-blue-400', bg: 'bg-blue-400/5', list: session.teamB },
-              ].map(({ label, color, bg, list }) => (
-                <div key={label} className={`${bg} rounded-xl p-4`}>
-                  <p className={`${color} text-xs tracking-widest mb-3`}>{label}</p>
-                  {list.map(n => (
-                    <p key={n} className={`text-sm py-1 ${n === player?.name ? `${color} font-black` : 'text-[#aaa]'}`}>
-                      {n}{n === player?.name ? ' (você)' : ''}
-                    </p>
-                  ))}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Vagas */}
-        <div>
-          <div className="flex items-baseline gap-2 mb-2">
-            <span className="text-5xl font-black">{confirmed.length}</span>
-            <span className="text-[#333] text-3xl">/{total}</span>
-            <span className="text-[#444] text-sm ml-1">confirmados</span>
-            {waiting.length > 0 && <span className="text-yellow-500 text-sm">+{waiting.length} fila</span>}
-          </div>
-          <div className="h-1.5 bg-border rounded-full overflow-hidden">
-            <div className="h-full rounded-full transition-all duration-500"
-              style={{
-                width: `${Math.min(100, (confirmed.length / total) * 100)}%`,
-                background: confirmed.length >= total ? '#00ff88' : '#00aaff'
-              }} />
+    <div className=\"min-h-screen bg-bg text-white font-sans pb-32\">
+      {/* Top Bar */}
+      <div className=\"border-b border-border bg-surface/50 backdrop-blur-md sticky top-0 z-40\">
+        <div className=\"max-w-lg mx-auto px-4 h-16 flex items-center justify-between\">
+          <Link href=\"/\" className=\"text-[#555] hover:text-white font-bold text-sm transition flex items-center gap-2\">
+            <span>←</span> Voltar para a Home
+          </Link>
+          <div className=\"flex items-center gap-2\">
+            <span className={`w-2 h-2 rounded-full ${isClosed ? 'bg-red-500' : 'bg-brand animate-pulse'}`} />
+            <span className=\"text-xs font-black tracking-widest text-[#555] uppercase\">
+              {isClosed ? `FECHADA (${session.format})` : 'LOBBY DINÂMICO'}
+            </span>
           </div>
         </div>
+      </div>
 
-        {/* Lista confirmados */}
-        <div>
-          <p className="text-[#333] text-xs tracking-widest mb-3">CONFIRMADOS</p>
-          <div className="space-y-1">
+      <div className=\"max-w-lg mx-auto px-4 mt-6\">
+        {/* Card Principal */}
+        <div className=\"bg-surface border border-border rounded-3xl p-6 relative overflow-hidden mb-6\">
+          <p className=\"text-[#444] text-xs font-black tracking-widest uppercase mb-1\">Horário do Jogo</p>
+          <h2 className=\"text-white font-black text-4xl mb-4\">🕒 {timeLabel}</h2>
+          
+          {!isClosed && diffMin > 0 && (
+            <div className=\"bg-brand/5 border border-brand/10 rounded-2xl p-4 flex items-center justify-between\">
+              <span className=\"text-xs text-[#666] font-medium\">Tempo restante para fechar a lista:</span>
+              <span className=\"text-brand font-black text-sm\">{diffMin} min</span>
+            </div>
+          )}
+        </div>
+
+        {/* Lista de Confirmados */}
+        <div className=\"mb-8\">
+          <div className=\"flex items-center justify-between mb-4 px-2\">
+            <h3 className=\"font-black text-sm tracking-widest text-[#444] uppercase\">Jogadores no Lobby ({confirmed.length})</h3>
+            <span className=\"text-xs text-[#555] font-bold\">Próximo corte em: 6, 8, 10, 12, 14, 16</span>
+          </div>
+
+          <div className=\"space-y-2.5\">
             {confirmed.map((p, i) => (
-              <div key={p.id} className="flex items-center gap-3 py-2 border-b border-border/50">
-                <span className="text-[#333] text-xs w-6">{i + 1}</span>
-                <span className={`flex-1 text-sm ${p.name === player?.name ? 'text-white font-bold' : 'text-[#aaa]'}`}>
-                  {p.name}{p.name === player?.name ? ' (você)' : ''}
+              <div key={p.id} className={`flex items-center justify-between px-5 py-4 rounded-2xl border transition ${p.name === player?.name ? 'bg-brand/5 border-brand/30' : 'bg-surface border-border'}`}>
+                <span className={`text-sm font-bold ${p.name === player?.name ? 'text-brand' : 'text-white'}`}>
+                  {i + 1}. {p.name} {p.name === player?.name ? ' (você)' : ''}
                 </span>
-                <span className="text-brand text-xs">✓</span>
+                <span className=\"text-brand/60 text-xs font-black\">✔ CONFIRMADO</span>
               </div>
             ))}
             {confirmed.length === 0 && (
-              <p className="text-[#333] text-sm py-2">Ninguém ainda — seja o primeiro!</p>
+              <p className=\"text-[#333] text-center text-sm font-bold py-8 border border-dashed border-border rounded-2xl\">Nenhum jogador confirmado ainda.</p>
             )}
           </div>
         </div>
 
-        {/* Fila de espera */}
+        {/* Lista de Espera */}
         {waiting.length > 0 && (
           <div>
-            <p className="text-yellow-500/60 text-xs tracking-widest mb-3">FILA DE ESPERA</p>
-            <div className="space-y-1">
+            <h3 className=\"font-black text-sm tracking-widest text-[#444] uppercase mb-4 px-2\">Fila de Espera ({waiting.length})</h3>
+            <div className=\"space-y-2.5\">
               {waiting.map((p, i) => (
-                <div key={p.id} className="flex items-center gap-3 py-2 border-b border-border/50">
-                  <span className="text-yellow-500/40 text-xs w-6">{i + 1}°</span>
-                  <span className={`flex-1 text-sm ${p.name === player?.name ? 'text-yellow-400 font-bold' : 'text-[#555]'}`}>
+                <div key={p.id} className=\"flex items-center justify-between px-5 py-4 rounded-2xl bg-surface/40 border border-border/60\">
+                  <span className={`text-sm font-bold ${p.name === player?.name ? 'text-yellow-400 font-bold' : 'text-[#555]'}`}>
                     {p.name}{p.name === player?.name ? ' (você)' : ''}
-                    {i === 0 && <span className="text-yellow-500/60 text-xs ml-2">· prioridade na próxima</span>}
                   </span>
-                  <span className="text-yellow-500/60 text-xs">⏳</span>
+                  <span className=\"text-yellow-500/60 text-xs\">⏳ FILA</span>
                 </div>
               ))}
             </div>
@@ -195,27 +189,24 @@ export default function CWPage({ params }: { params: { id: string } }) {
         )}
       </div>
 
-      {/* Botão fixo */}
+      {/* Botão Fixo de Ação */}
       {!isClosed && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-full max-w-lg px-4">
+        <div className=\"fixed bottom-6 left-1/2 -translate-x-1/2 w-full max-w-lg px-4\">
           {myEntry ? (
             <button onClick={handleLeave} disabled={loading}
-              className="w-full border border-red-500/30 text-red-400 font-bold text-sm py-5 rounded-2xl hover:bg-red-500/10 transition disabled:opacity-40">
-              {loading ? 'Saindo...' : myEntry.status === 'waiting' ? 'SAIR DA FILA' : 'SAIR DA CW'}
+              className=\"w-full border border-red-500/30 text-red-400 font-bold text-sm py-5 rounded-2xl hover:bg-red-500/10 transition disabled:opacity-40\">
+              {loading ? 'Saindo...' : myEntry.status === 'waiting' ? 'SAIR DA FILA' : 'SAIR DO LOBBY'}
             </button>
           ) : (
             <button onClick={handleJoin} disabled={loading || !check.allowed}
-              className="w-full bg-brand text-bg font-black text-sm tracking-widest py-5 rounded-2xl disabled:opacity-20 hover:brightness-110 transition shadow-lg shadow-brand/20">
-              {loading ? 'Entrando...'
-                : !check.allowed ? `🔒 ${check.reason}`
-                : confirmed.length >= total ? 'ENTRAR NA FILA'
-                : 'QUERO JOGAR'}
+              className=\"w-full bg-brand text-bg font-black text-sm tracking-widest py-5 rounded-2xl disabled:opacity-20 hover:brightness-110 transition shadow-lg shadow-brand/20\">
+              {loading ? 'Entrando...' : '⚡ CONFIRMAR PRESENÇA'}
             </button>
           )}
         </div>
       )}
 
-      {showLogin && <LoginModal onClose={() => setShowLogin(false)} />}
-    </main>
+      {showLogin && <LoginModal onLogin={(name, pix) => { setPlayer({ name, pix }); setShowLogin(false); }} onClose={() => setShowLogin(false)} />}
+    </div>
   );
 }
