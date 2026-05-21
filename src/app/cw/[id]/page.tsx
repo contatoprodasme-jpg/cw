@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, use } from 'react';
 import { listenSessions, listenPlayers, leaveCW, promoteFirst, closeCW, updateStatus, canJoin, joinCW } from '@/lib/cwService';
 import { sendEmails } from '@/lib/emailService';
 import { CWSession, Player } from '@/types';
@@ -7,8 +7,11 @@ import { useLocalPlayer } from '@/components/PlayerProvider';
 import LoginModal from '@/components/LoginModal';
 import Link from 'next/link';
 
-export default function CWPage({ params }: { params: { id: string } }) {
-  const id = params.id;
+export default function CWPage({ params }: { params: Promise<{ id: string }> }) {
+  // Desembrulha os parâmetros usando o hook 'use' nativo do Next.js
+  const resolvedParams = use(params);
+  const id = resolvedParams.id;
+
   const { player, setPlayer } = useLocalPlayer();
   const [session, setSession] = useState<CWSession | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
@@ -22,17 +25,20 @@ export default function CWPage({ params }: { params: { id: string } }) {
   }, []);
 
   useEffect(() => {
+    if (!id) return;
     return listenSessions(all => {
       const s = all.find(s => s.id === id);
       if (s) setSession(s);
     });
   }, [id]);
 
-  useEffect(() => listenPlayers(id, setPlayers), [id]);
+  useEffect(() => {
+    if (id) return listenPlayers(id, setPlayers);
+  }, [id]);
 
   // Lógica Dinâmica para verificar e fechar CWs por tamanho de lista completo
   useEffect(() => {
-    if (!session || session.status === 'closed') return;
+    if (!session || session.status === 'closed' || !id) return;
 
     const confirmedPlayers = players.filter(p => p.status === 'confirmed');
     const totalConfirmed = confirmedPlayers.length;
@@ -63,7 +69,7 @@ export default function CWPage({ params }: { params: { id: string } }) {
 
   // Auto-fechar por tempo esgotado
   useEffect(() => {
-    if (!session || session.status === 'closed' || !session.closingTime) return;
+    if (!session || session.status === 'closed' || !session.closingTime || !id) return;
     const limit = new Date(session.closingTime.seconds * 1000);
     if (now >= limit) {
       const confirmed = players.filter(p => p.status === 'confirmed').length;
@@ -89,6 +95,7 @@ export default function CWPage({ params }: { params: { id: string } }) {
 
   const handleJoin = async () => {
     if (!player) { setShowLogin(true); return; }
+    if (!id) return;
     setLoading(true);
     try {
       const targetStatus = confirmed.length < 16 ? 'confirmed' : 'waiting';
@@ -101,12 +108,11 @@ export default function CWPage({ params }: { params: { id: string } }) {
   };
 
   const handleLeave = async () => {
-    if (!player || !myEntry) return;
+    if (!player || !myEntry || !id) return;
     setLoading(true);
     try {
       await leaveCW(id, myEntry.id);
       if (myEntry.status === 'confirmed' && waiting.length > 0) {
-        // Correção aplicada para passar os dois parâmetros esperados pelo cwService
         await promoteFirst(id, waiting[0]); 
       }
     } catch (e) {
@@ -141,75 +147,4 @@ export default function CWPage({ params }: { params: { id: string } }) {
       <div className="max-w-lg mx-auto px-4 mt-6">
         {/* Card Principal */}
         <div className="bg-surface border border-border rounded-3xl p-6 relative overflow-hidden mb-6">
-          <p className="text-[#444] text-xs font-black tracking-widest uppercase mb-1">Horário do Jogo</p>
-          <h2 className="text-white font-black text-4xl mb-4">🕒 {timeLabel}</h2>
-          
-          {!isClosed && diffMin > 0 && (
-            <div className="bg-brand/5 border border-brand/10 rounded-2xl p-4 flex items-center justify-between">
-              <span className="text-xs text-[#666] font-medium">Tempo restante para fechar a lista:</span>
-              <span className="text-brand font-black text-sm">{diffMin} min</span>
-            </div>
-          )}
-        </div>
-
-        {/* Lista de Confirmados */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-4 px-2">
-            <h3 className="font-black text-sm tracking-widest text-[#444] uppercase">Jogadores no Lobby ({confirmed.length})</h3>
-            <span className="text-xs text-[#555] font-bold">Próximo corte em: 6, 8, 10, 12, 14, 16</span>
-          </div>
-
-          <div className="space-y-2.5">
-            {confirmed.map((p, i) => (
-              <div key={p.id} className={`flex items-center justify-between px-5 py-4 rounded-2xl border transition ${p.name === player?.name ? 'bg-brand/5 border-brand/30' : 'bg-surface border-border'}`}>
-                <span className={`text-sm font-bold ${p.name === player?.name ? 'text-brand' : 'text-white'}`}>
-                  {i + 1}. {p.name} {p.name === player?.name ? ' (você)' : ''}
-                </span>
-                <span className="text-brand/60 text-xs font-black">✔ CONFIRMADO</span>
-              </div>
-            ))}
-            {confirmed.length === 0 && (
-              <p className="text-[#333] text-center text-sm font-bold py-8 border border-dashed border-border rounded-2xl">Nenhum jogador confirmado ainda.</p>
-            )}
-          </div>
-        </div>
-
-        {/* Lista de Espera */}
-        {waiting.length > 0 && (
-          <div>
-            <h3 className="font-black text-sm tracking-widest text-[#444] uppercase mb-4 px-2">Fila de Espera ({waiting.length})</h3>
-            <div className="space-y-2.5">
-              {waiting.map((p, i) => (
-                <div key={p.id} className="flex items-center justify-between px-5 py-4 rounded-2xl bg-surface/40 border border-border/60">
-                  <span className={`text-sm font-bold ${p.name === player?.name ? 'text-yellow-400 font-bold' : 'text-[#555]'}`}>
-                    {p.name}{p.name === player?.name ? ' (você)' : ''}
-                  </span>
-                  <span className="text-yellow-500/60 text-xs">⏳ FILA</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Botão Fixo de Ação */}
-      {!isClosed && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-full max-w-lg px-4">
-          {myEntry ? (
-            <button onClick={handleLeave} disabled={loading}
-              className="w-full border border-red-500/30 text-red-400 font-bold text-sm py-5 rounded-2xl hover:bg-red-500/10 transition disabled:opacity-40">
-              {loading ? 'Saindo...' : myEntry.status === 'waiting' ? 'SAIR DA FILA' : 'SAIR DO LOBBY'}
-            </button>
-          ) : (
-            <button onClick={handleJoin} disabled={loading || !check.allowed}
-              className="w-full bg-brand text-bg font-black text-sm tracking-widest py-5 rounded-2xl disabled:opacity-20 hover:brightness-110 transition shadow-lg shadow-brand/20">
-              {loading ? 'Entrando...' : '⚡ CONFIRMAR PRESENÇA'}
-            </button>
-          )}
-        </div>
-      )}
-
-      {showLogin && <LoginModal onLogin={(name, pix) => { setPlayer({ name, pix }); setShowLogin(false); }} onClose={() => setShowLogin(false)} />}
-    </div>
-  );
-}
+          <p className="text-[#444] text-xs
