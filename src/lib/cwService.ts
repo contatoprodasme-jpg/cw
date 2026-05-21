@@ -1,7 +1,7 @@
 import {
   collection, doc, addDoc, updateDoc, deleteDoc,
   onSnapshot, query, orderBy, serverTimestamp,
-  getDocs, where, Timestamp,
+  getDocs, where
 } from 'firebase/firestore';
 import { db } from './firebase';
 import { CWSession, Notice, Player } from '../types';
@@ -10,7 +10,6 @@ import { CWSession, Notice, Player } from '../types';
 export function canJoin(session: CWSession, players: Player[], playerName: string): { allowed: boolean; reason?: string } {
   if (!session.closingTime) return { allowed: true };
   
-  // Se o documento usa Timestamp do Firebase, converte para Date
   const seconds = (session.closingTime as any).seconds;
   const limit = seconds ? new Date(seconds * 1000) : new Date(session.closingTime as any);
   
@@ -21,7 +20,6 @@ export function canJoin(session: CWSession, players: Player[], playerName: strin
   if (min <= 0) return { allowed: false, reason: 'Tempo esgotado' };
   if (min <= 5) return { allowed: false, reason: 'Bloqueado (falta menos de 5 min)' };
 
-  // Verifica se o jogador já está dentro
   const inside = players.some(p => p.name === playerName);
   if (min <= 10 && !inside) {
     return { allowed: false, reason: 'Bloqueado (novas entradas suspensas a 10 min do fim)' };
@@ -70,12 +68,10 @@ export function listenSessions(cb: (s: CWSession[]) => void) {
 
 // ── Players ──────────────────────────────────────────────────────
 export async function joinCW(cwId: string, player: { name: string; pix?: string }, status: 'confirmed' | 'waiting') {
-  // Verifica se o jogador já existe nessa lista para não duplicar com cliques rápidos
   const q = query(collection(db, 'cw_players'), where('cwId', '==', cwId), where('name', '==', player.name));
   const existing = await getDocs(q);
   if (!existing.empty) return;
 
-  // Busca total de jogadores na sessão para definir a posição na fila
   const allSnap = await getDocs(query(collection(db, 'cw_players'), where('cwId', '==', cwId)));
   const position = allSnap.size + 1;
 
@@ -111,4 +107,19 @@ export function listenPlayers(cwId: string, cb: (p: Player[]) => void) {
 
 export async function getPlayers(cwId: string): Promise<Player[]> {
   const snap = await getDocs(query(collection(db, 'cw_players'), where('cwId', '==', cwId)));
-  return snap.docs.map(d => ({ id: d.id, ...d.data() })
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }) as Player);
+}
+
+// ── Notices ──────────────────────────────────────────────────────
+export async function postNotice(playerName: string, text: string) {
+  await addDoc(collection(db, 'notices'), {
+    playerName, text: text.slice(0, 200), createdAt: serverTimestamp()
+  });
+}
+
+export function listenNotices(cb: (n: Notice[]) => void) {
+  return onSnapshot(
+    query(collection(db, 'notices'), orderBy('createdAt', 'desc')),
+    snap => cb(snap.docs.map(d => ({ id: d.id, ...d.data() }) as Notice))
+  );
+}
